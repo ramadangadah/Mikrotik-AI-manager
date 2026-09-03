@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #232c3a; border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #2c3849; }
+
+.card {
+  @apply bg-panel border border-border rounded-xl;
+}
+
+.btn {
+  @apply inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+}
+.btn-primary { @apply bg-accent text-white hover:bg-sky-400; }
+.btn-secondary { @apply bg-panel2 text-slate-200 border border-border hover:bg-[#1d2634]; }
+.btn-danger { @apply bg-crit/90 text-white hover:bg-crit; }
+.btn-ghost { @apply text-slate-300 hover:bg-panel2; }
+
+.input {
+  @apply w-full bg-panel2 border border-border rounded-lg px-3 py-1.5 text-sm text-slate-100 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent;
+}
+
+.label {
+  @apply text-xs font-medium text-muted mb-1 block;
+}
+
+.badge {
+  @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium;
+}
+.badge-online { @apply bg-accent2/15 text-accent2; }
+.badge-offline { @apply bg-crit/15 text-crit; }
+.badge-unknown { @apply bg-muted/15 text-muted; }
+.badge-degraded { @apply bg-warn/15 text-warn; }
+
+.badge-info { @apply bg-accent/15 text-accent; }
+.badge-warning { @apply bg-warn/15 text-warn; }
+.badge-critical { @apply bg-crit/15 text-crit; }

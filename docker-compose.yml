@@ -1,0 +1,35 @@
+services:
+  app:
+    build: .
+    image: mikrotik-ai-manager:latest
+    container_name: mikrotik-ai-manager
+    restart: unless-stopped
+    ports:
+      - "8008:8008"
+    env_file:
+      - .env
+    volumes:
+      # Everything that must survive a restart/redeploy lives here: the
+      # SQLite database, the Fernet key used to decrypt stored device
+      # credentials, uploaded firmware, and pulled config backups. Losing
+      # this volume without a copy of the DB means every stored
+      # router/CPE password becomes undecryptable - back it up.
+      - mikrotik_data:/app/data
+    # Required for the PPTP/L2TP/WireGuard VPN tunnel feature - the app
+    # dials these from inside the container using pppd/wg-quick, which need
+    # to create network interfaces and routes. If you never use the VPN
+    # tunnel feature (SOCKS relay and direct/IP-range CPEs work fine
+    # without it), these two lines can be removed.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - "/dev/ppp:/dev/ppp"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8008/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  mikrotik_data:
