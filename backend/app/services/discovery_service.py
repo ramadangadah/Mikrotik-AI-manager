@@ -341,3 +341,79 @@ async def scan_ip_range(
 
     await db.commit()
     return {"addresses_scanned": len(ips), "responded": len(found), "created": created, "updated": updated, "network_id": network.id}
+
+
+async def scan_management_router_range(
+    db: AsyncSession,
+    ip_range: str,
+    *,
+    username: str,
+    password: str,
+    port: int = 443,
+    api_type: ApiType = ApiType.rest,
+    verify_tls: bool = False,
+    use_socks_relay: bool = True,
+    socks_port: int = 1080,
+    concurrency: int = 20,
+    timeout: float = 4.0,
+) -> dict:
+    """
+    The same idea as scan_ip_range() above, but for the top-level management
+    routers themselves rather than CPEs underneath one: tries one shared set
+    of admin credentials against every address in a range, and registers a
+    brand new ManagementRouter for whatever answers. Handy for onboarding a
+    whole batch of sites/towers at once when they were all provisioned with
+    the same admin login. Addresses that already belong to an existing
+    management router are left alone (skipped, never duplicated).
+    """
+    ips = _parse_ip_range(ip_range)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    existing_hosts = {r.host for r in (await db.execute(select(ManagementRouter))).scalars().all()}
+
+    async def probe(ip: str) -> tuple[str, str, dict | None]:
+        if ip in existing_hosts:
+            return ip, "skipped", None
+        async with semaphore:
+            target = ConnectionTarget(
+                host=ip, port=port, username=username, password=password,
+                api_type=api_type.value, verify_tls=verify_tls, timeout=timeout,
+            )
+            try:
+                async with connect(target) as ros:
+                    resource = await ros.get_single("system/resource")
+                    identity = await ros.get_single("system/identity")
+                return ip, "found", {
+                    "version": resource.get("version"),
+                    "board": resource.get("board-name"),
+                    "identity": identity.get("name") if identity else None,
+                }
+            except (RouterOSError, OSError, asyncio.TimeoutError):
+                return ip, "no_response", None
+
+    results = await asyncio.gather(*(probe(ip) for ip in ips))
+
+    created_names: list[str] = []
+    for ip, outcome, info in results:
+        if outcome != "found":
+            continue
+        name = (info.get("identity") if info else None) or f"Router {ip}"
+        db.add(ManagementRouter(
+            name=name, host=ip, port=port, api_type=api_type,
+            username=username, password_encrypted=encrypt(password),
+            verify_tls=verify_tls, use_socks_relay=use_socks_relay, socks_port=socks_port,
+            identity=info.get("identity") if info else None,
+            routeros_version=info.get("version") if info else None,
+            board_name=info.get("board") if info else None,
+            status=DeviceStatus.online,
+        ))
+        created_names.append(name)
+
+    await db.commit()
+    return {
+        "addresses_scanned": len(ips),
+        "responded": sum(1 for _, o, _ in results if o == "found"),
+        "skipped_existing": sum(1 for _, o, _ in results if o == "skipped"),
+        "created": len(created_names),
+        "routers": created_names,
+    }

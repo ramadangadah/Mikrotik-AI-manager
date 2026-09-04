@@ -79,6 +79,70 @@ def _remotename(router: ManagementRouter) -> str:
     return f"app-{_tag(router)}"
 
 
+def _allowed_ips(router: ManagementRouter, cidrs: list[str]) -> str:
+    """
+    Builds the WireGuard AllowedIPs list: the router's own tunnel address
+    (wg_peer_address) always comes first when set, so basic app<->router
+    connectivity works over the tunnel itself, followed by every "Private
+    network routes" CIDR for CPEs behind it.
+
+    Previous behaviour here fell back to `wg_local_address` (this APP's own
+    tunnel address, not the router's) whenever no CIDRs were configured -
+    that's a bug that produces exactly the "connects but no connectivity"
+    symptom, since it makes AllowedIPs exclude the router's own address:
+    WireGuard's cryptokey routing then drops every packet actually coming
+    from the router. Kept only as a last-resort so an existing tunnel with
+    nothing configured at all still comes up rather than failing outright.
+    """
+    allowed: list[str] = []
+    if router.wg_peer_address:
+        peer_ip = router.wg_peer_address.strip().split("/")[0]
+        if peer_ip:
+            peer_cidr = f"{peer_ip}/32"
+            if peer_cidr not in allowed:
+                allowed.append(peer_cidr)
+    for c in cidrs:
+        if c and c not in allowed:
+            allowed.append(c)
+    if not allowed:
+        allowed = [router.wg_local_address] if router.wg_local_address else ["0.0.0.0/0"]
+    return ", ".join(allowed)
+
+
+async def _check_wireguard_reachability(router: ManagementRouter) -> str | None:
+    """
+    Best-effort post-connect sanity check: the interface coming up (what
+    `connect()` already verifies) only means WireGuard itself is running -
+    it says nothing about whether the router actually answers on its tunnel
+    address. Pings it once, briefly, and returns a human-readable warning
+    string if it doesn't answer (None if it does, or if we can't tell because
+    no wg_peer_address is on file, or the `ping` binary is missing).
+    """
+    if not router.wg_peer_address:
+        return "Connected, but no router tunnel address (wg_peer_address) is set, so connectivity wasn't verified."
+    peer_ip = router.wg_peer_address.strip().split("/")[0]
+    if not peer_ip:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "2", "-W", "2", peer_ip,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = await asyncio.wait_for(proc.wait(), timeout=8)
+    except FileNotFoundError:
+        return None  # ping not installed in this image - can't check, don't block on it
+    except asyncio.TimeoutError:
+        return f"Connected, but the router's tunnel address ({peer_ip}) did not answer a ping within 8s."
+    if rc != 0:
+        return (
+            f"Interface is up, but the router's tunnel address ({peer_ip}) is not answering ping. "
+            "Check that WireGuard is actually running and enabled on the router itself, that its "
+            "AllowedIPs for this app's peer includes this app's address, and that no firewall rule on "
+            "the router is blocking traffic from the WireGuard interface."
+        )
+    return None
+
+
 async def _write_chap_secret(remotename: str, username: str, password: str) -> None:
     async with _file_lock:
         lines = []
@@ -129,6 +193,35 @@ async def _wait_for_up(tag: str, timeout: float = CONNECT_TIMEOUT_S) -> str | No
     return None
 
 
+def _preflight_ppp(required_binaries: tuple[str, ...]) -> str | None:
+    """
+    A stuck-at-"connecting"-then-generic-timeout failure for PPTP/L2TP is
+    almost always one of a handful of environment problems, not a bad
+    username/password - and the plain "tunnel did not come up within 25s"
+    error from _finish_connect() gives no hint which. Check the cheap,
+    obvious things up front and return a specific, actionable message
+    instead of letting it fail into that generic timeout 25 seconds later.
+    """
+    if not os.path.exists("/dev/ppp"):
+        return (
+            "/dev/ppp is missing in this container - PPTP/L2TP need it to create a ppp interface. "
+            "The container must be started with the ppp kernel module loaded on the HOST and "
+            '`devices: ["/dev/ppp:/dev/ppp"]` plus `cap_add: [NET_ADMIN]` in docker-compose.yml '
+            "(these can't be added to an already-running container - recreate it after adding them). "
+            "On the host, `sudo modprobe ppp_generic` first if the device still doesn't exist."
+        )
+
+    import shutil
+
+    missing = [b for b in required_binaries if not shutil.which(b)]
+    if missing:
+        return (
+            f"Required binary/binaries not found in this container image: {', '.join(missing)}. "
+            "Rebuild the image (docker compose up -d --build) after pulling the latest code."
+        )
+    return None
+
+
 async def _kill_stale(pattern: str) -> None:
     """Best-effort cleanup of a previous tunnel attempt for the same router,
     including across app restarts (when we no longer hold the Process handle)."""
@@ -161,6 +254,15 @@ async def _connect_pptp(db: AsyncSession, router: ManagementRouter) -> Managemen
     router.vpn_last_error = None
     db.add(router)
     await db.commit()
+
+    preflight_error = _preflight_ppp(("pppd", "pptp"))
+    if preflight_error:
+        router.vpn_status = VpnStatus.error
+        router.vpn_last_error = preflight_error
+        db.add(router)
+        await db.commit()
+        await db.refresh(router)
+        return router
 
     await _kill_stale(f"ipparam {tag}")
     try:
@@ -209,6 +311,15 @@ async def _connect_l2tp(db: AsyncSession, router: ManagementRouter) -> Managemen
     router.vpn_last_error = None
     db.add(router)
     await db.commit()
+
+    preflight_error = _preflight_ppp(("pppd", "xl2tpd", "xl2tpd-control"))
+    if preflight_error:
+        router.vpn_status = VpnStatus.error
+        router.vpn_last_error = preflight_error
+        db.add(router)
+        await db.commit()
+        await db.refresh(router)
+        return router
 
     await _write_chap_secret(remotename, router.vpn_username or "", password)
     _write_cidr_file(tag, await _route_cidrs(db, router))
@@ -303,7 +414,7 @@ async def _connect_wireguard(db: AsyncSession, router: ManagementRouter) -> Mana
     private_key = decrypt(router.wg_private_key_encrypted)
     preshared = decrypt(router.wg_preshared_key_encrypted) if router.wg_preshared_key_encrypted else None
     cidrs = await _route_cidrs(db, router)
-    allowed_ips = ", ".join(cidrs) if cidrs else (router.wg_local_address or "0.0.0.0/0")
+    allowed_ips = _allowed_ips(router, cidrs)
 
     os.makedirs(WIREGUARD_DIR, exist_ok=True)
     lines = [
@@ -351,7 +462,7 @@ async def _connect_wireguard(db: AsyncSession, router: ManagementRouter) -> Mana
         router.vpn_status = VpnStatus.connected
         router.vpn_interface = iface
         router.vpn_connected_at = datetime.now(timezone.utc)
-        router.vpn_last_error = None
+        router.vpn_last_error = await _check_wireguard_reachability(router)
     else:
         router.vpn_status = VpnStatus.error
         router.vpn_last_error = out.decode(errors="replace")[-500:] if out else "wg-quick up failed"
@@ -452,7 +563,7 @@ async def apply_routes(db: AsyncSession, router: ManagementRouter) -> None:
     if router.vpn_type == VpnType.wireguard:
         if not router.vpn_interface or not router.wg_peer_public_key:
             return
-        allowed_ips = ", ".join(cidrs) if cidrs else (router.wg_local_address or "0.0.0.0/0")
+        allowed_ips = _allowed_ips(router, cidrs)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "wg", "set", router.vpn_interface, "peer", router.wg_peer_public_key,
@@ -515,6 +626,16 @@ async def refresh_status(db: AsyncSession, router: ManagementRouter) -> Manageme
         db.add(router)
         await db.commit()
         await db.refresh(router)
+    elif router.vpn_type == VpnType.wireguard:
+        # Interface is up, but that alone doesn't mean traffic is actually
+        # flowing - re-check reachability so a stale "connected" status
+        # doesn't hide a tunnel that's up but not passing traffic.
+        warning = await _check_wireguard_reachability(router)
+        if warning != router.vpn_last_error:
+            router.vpn_last_error = warning
+            db.add(router)
+            await db.commit()
+            await db.refresh(router)
     return router
 
 

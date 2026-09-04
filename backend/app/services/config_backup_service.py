@@ -64,21 +64,24 @@ def _download_sync(target, remote_filename: str, local_path: str, ssh_port: int 
         transport.close()
 
 
-async def backup_management_router(db: AsyncSession, router: ManagementRouter) -> ConfigBackup:
-    return await _backup(db, target_for_management_router(router), BackupTargetType.management_router, router.id, router.name)
+async def backup_management_router(db: AsyncSession, router: ManagementRouter, ssh_port: int = 22) -> ConfigBackup:
+    return await _backup(db, target_for_management_router(router), BackupTargetType.management_router, router.id, router.name, ssh_port=ssh_port)
 
 
-async def backup_cpe(db: AsyncSession, cpe: CPE, router: ManagementRouter) -> ConfigBackup:
-    return await _backup(db, target_for_cpe(cpe, router), BackupTargetType.cpe, cpe.id, cpe.name)
+async def backup_cpe(db: AsyncSession, cpe: CPE, router: ManagementRouter, ssh_port: int = 22) -> ConfigBackup:
+    return await _backup(db, target_for_cpe(cpe, router), BackupTargetType.cpe, cpe.id, cpe.name, ssh_port=ssh_port)
 
 
-async def _backup(db: AsyncSession, target, target_type: BackupTargetType, target_id: int, target_name: str) -> ConfigBackup:
+async def _backup(db: AsyncSession, target, target_type: BackupTargetType, target_id: int, target_name: str, ssh_port: int = 22) -> ConfigBackup:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     remote_name = f"auto-{timestamp}"
 
-    async with connect(target) as ros:
-        await ros.run_action("system/backup", "save", name=remote_name)
-        info = await ros.get_single("system/resource")
+    try:
+        async with connect(target) as ros:
+            await ros.run_action("system/backup", "save", name=remote_name)
+            info = await ros.get_single("system/resource")
+    except RouterOSError as e:
+        raise RouterOSError(f"Could not create the backup file on the device (via its RouterOS API): {e}") from e
 
     safe_target = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)
     out_dir = os.path.join(settings.BACKUP_DIR, f"{target_type.value}-{target_id}-{safe_target}")
@@ -86,7 +89,20 @@ async def _backup(db: AsyncSession, target, target_type: BackupTargetType, targe
     local_path = os.path.join(out_dir, f"{remote_name}.backup")
 
     await asyncio.sleep(2)  # give RouterOS a moment to finish writing the file
-    await asyncio.to_thread(_download_sync, target, f"{remote_name}.backup", local_path)
+    try:
+        await asyncio.to_thread(_download_sync, target, f"{remote_name}.backup", local_path, ssh_port)
+    except Exception as e:
+        # The backup file WAS created on the device (the API call above
+        # succeeded) - only the SFTP download failed. Most common causes:
+        # SSH/SFTP running on a non-default port (pass ssh_port), the
+        # device's SSH service disabled, or a firewall blocking port 22
+        # specifically while the RouterOS API port stays open.
+        raise RouterOSError(
+            f"Backup file '{remote_name}.backup' was created on the device, but downloading it via "
+            f"SFTP (port {ssh_port}) failed: {e}. Check that the device's SSH/SFTP service is enabled "
+            f"and reachable on that port (RouterOS: /ip service, 'ssh') - if it uses a different port, "
+            f"pass ?ssh_port=<port> when triggering the backup."
+        ) from e
 
     size = os.path.getsize(local_path) if os.path.exists(local_path) else None
     backup = ConfigBackup(

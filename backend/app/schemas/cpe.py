@@ -48,6 +48,12 @@ class BulkAdoptRequest(BaseModel):
     api_type: ApiType = ApiType.rest
 
 
+class BulkMactelnetSyncRequest(BaseModel):
+    cpe_ids: list[int]
+    username: str
+    password: str
+
+
 class CPEOut(BaseModel):
     id: int
     network_id: int

@@ -93,6 +93,16 @@ class ManagementRouter(Base):
     wg_preshared_key_encrypted: Mapped[str | None] = mapped_column(String(512), nullable=True)
     wg_endpoint_port: Mapped[int] = mapped_column(Integer, default=51820)
     wg_local_address: Mapped[str | None] = mapped_column(String(64), nullable=True)  # e.g. "10.10.0.250/32"
+    # The router's OWN address on the WireGuard tunnel (e.g. "10.10.0.1" - no
+    # prefix needed, a /32 is assumed) - NOT the same thing as wg_local_address
+    # above, which is this app's own tunnel address. Always added to AllowedIPs
+    # alongside any "Private network routes" CIDRs, so the app and the router
+    # can reach each other over the tunnel (e.g. for CPE tests) even before any
+    # CPE routes have been configured. Leaving this blank is the single most
+    # common cause of "WireGuard shows connected but nothing is reachable
+    # through it" - without it, the app-side tunnel config has no reason to
+    # accept or route packets to/from the router's own tunnel IP at all.
+    wg_peer_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     wg_keepalive: Mapped[int] = mapped_column(Integer, default=25)
 
     identity: Mapped[str | None] = mapped_column(String(128), nullable=True)

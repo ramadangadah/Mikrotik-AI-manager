@@ -9,10 +9,53 @@ from app.core.database import get_db
 from app.models.management_router import ApiType, ManagementRouter
 from app.models.user import User
 from app.services import audit
-from app.services.discovery_service import run_discovery, scan_ip_range
+from app.services.discovery_service import run_discovery, scan_ip_range, scan_management_router_range
 from app.services.routeros_client import RouterOSError
 
 router = APIRouter(prefix="/api/discovery", tags=["discovery"], dependencies=[Depends(require_password_set)])
+
+
+class ManagementRouterRangeScanRequest(BaseModel):
+    ip_range: str  # "10.10.0.0/24", "10.10.0.1-10.10.0.50", or a single IP
+    username: str
+    password: str
+    port: int = 443
+    api_type: ApiType = ApiType.rest
+    verify_tls: bool = False
+    use_socks_relay: bool = True
+    socks_port: int = 1080
+    concurrency: int = 20
+
+
+# NOTE: registered before the /{router_id}/... routes below on purpose - a
+# literal path segment ("management-routers") would otherwise also satisfy
+# those routes' {router_id} placeholder, and Starlette matches routes in
+# registration order, so this specific one has to come first to win.
+@router.post("/management-routers/ip-range-scan")
+async def management_router_ip_range_scan(
+    payload: ManagementRouterRangeScanRequest,
+    user: User = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Bulk-add management routers: tries one shared set of credentials against
+    every address in an IP range and registers whatever answers as a brand
+    new management router - the same idea as the CPE ip-range-scan below,
+    one level up. Addresses that already belong to an existing router are
+    left untouched.
+    """
+    try:
+        summary = await scan_management_router_range(
+            db, payload.ip_range,
+            username=payload.username, password=payload.password, port=payload.port,
+            api_type=payload.api_type, verify_tls=payload.verify_tls,
+            use_socks_relay=payload.use_socks_relay, socks_port=payload.socks_port,
+            concurrency=payload.concurrency,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await audit.record(db, user.username, "management_router_ip_range_scan", target=payload.ip_range, details=str(summary))
+    return summary
 
 
 class DiscoveryRequest(BaseModel):

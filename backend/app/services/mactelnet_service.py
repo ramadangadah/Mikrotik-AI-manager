@@ -139,6 +139,63 @@ def _strip_echo(raw: str, cmd: str) -> str:
     return "\n".join(lines).strip()
 
 
+async def bulk_sync(db, cpes: list, username: str, password: str, delay_s: float = 0.3) -> dict:
+    """
+    "Synchronize a range of CPEs one by one via MAC-Telnet, using one shared
+    username/password" - the MAC-Telnet counterpart to discovery_service.py's
+    scan_ip_range() bulk-adopt. Takes a list of already-known CPE rows (e.g.
+    everything discovered under a router via its neighbor/ARP tables, which
+    captures MAC addresses even for devices with no usable IP - see
+    discovery_service.py), tries the same credentials against each one's MAC
+    address, and adopts (stores the credentials on) whichever ones answer.
+
+    Deliberately sequential rather than run concurrently like the IP-range
+    scan: MAC-Telnet is an interactive, stateful pexpect session per device,
+    and firing many of them at once against the same broadcast domain is far
+    more likely to step on itself (and flood a shared segment) than a plain
+    TCP connect attempt is. A small delay between attempts is applied for
+    the same reason. Commits after every device, so a long run that gets
+    interrupted partway through still keeps whatever it already synced.
+    """
+    from datetime import datetime, timezone
+
+    from app.core.crypto import encrypt
+    from app.models.management_router import DeviceStatus
+
+    results = []
+    synced = failed = skipped = 0
+    for cpe in cpes:
+        if not cpe.mac_address:
+            results.append({"cpe_id": cpe.id, "name": cpe.name, "ok": False, "skipped": True, "error": "no MAC address on file for this CPE yet"})
+            skipped += 1
+            continue
+        try:
+            info = await test_reachable(cpe.mac_address, username, password)
+            cpe.username = username
+            cpe.password_encrypted = encrypt(password)
+            if info.get("identity"):
+                cpe.name = info["identity"]
+            cpe.model = info.get("board") or cpe.model
+            cpe.routeros_version = info.get("version") or cpe.routeros_version
+            cpe.status = DeviceStatus.online
+            cpe.last_seen = datetime.now(timezone.utc)
+            cpe.last_error = None
+            db.add(cpe)
+            await db.commit()
+            results.append({"cpe_id": cpe.id, "name": cpe.name, "mac_address": cpe.mac_address, "ok": True, **info})
+            synced += 1
+        except MacTelnetError as e:
+            cpe.last_error = str(e)[:500]
+            db.add(cpe)
+            await db.commit()
+            results.append({"cpe_id": cpe.id, "name": cpe.name, "mac_address": cpe.mac_address, "ok": False, "error": str(e)})
+            failed += 1
+        if delay_s:
+            await asyncio.sleep(delay_s)
+
+    return {"total": len(cpes), "synced": synced, "failed": failed, "skipped": skipped, "results": results}
+
+
 async def test_reachable(mac_address: str, username: str, password: str) -> dict:
     """Quick reachability probe used by the CPE detail page's 'Test via
     MAC-Telnet' button - runs `/system identity print` and `/system

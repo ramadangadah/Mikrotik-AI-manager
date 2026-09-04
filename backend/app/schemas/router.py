@@ -28,6 +28,7 @@ class ManagementRouterCreate(BaseModel):
     wg_preshared_key: str | None = None
     wg_endpoint_port: int = 51820
     wg_local_address: str | None = None
+    wg_peer_address: str | None = None
     wg_keepalive: int = 25
 
 
@@ -51,6 +52,7 @@ class ManagementRouterUpdate(BaseModel):
     wg_preshared_key: str | None = None
     wg_endpoint_port: int | None = None
     wg_local_address: str | None = None
+    wg_peer_address: str | None = None
     wg_keepalive: int | None = None
 
 
@@ -77,6 +79,7 @@ class ManagementRouterOut(BaseModel):
     wg_peer_public_key: str | None
     wg_endpoint_port: int
     wg_local_address: str | None
+    wg_peer_address: str | None
     wg_keepalive: int
     identity: str | None
     routeros_version: str | None

@@ -56,6 +56,7 @@ async def create_router(
         wg_preshared_key_encrypted=encrypt(payload.wg_preshared_key) if payload.wg_preshared_key else None,
         wg_endpoint_port=payload.wg_endpoint_port,
         wg_local_address=payload.wg_local_address,
+        wg_peer_address=payload.wg_peer_address,
         wg_keepalive=payload.wg_keepalive,
     )
     db.add(mr)

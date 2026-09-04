@@ -17,6 +17,7 @@ from app.models.user import User
 from app.schemas.job import JobOut
 from app.services import audit
 from app.services.config_backup_service import backup_cpe, backup_management_router, restore_now
+from app.services.routeros_client import RouterOSError
 
 router = APIRouter(prefix="/api/config-backups", tags=["config-backups"], dependencies=[Depends(require_password_set)])
 
@@ -51,22 +52,38 @@ async def list_backups(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/management-router/{router_id}")
-async def backup_router_now(router_id: int, user: User = Depends(require_operator), db: AsyncSession = Depends(get_db)):
+async def backup_router_now(
+    router_id: int,
+    ssh_port: int = 22,
+    user: User = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+):
     mr = await db.get(ManagementRouter, router_id)
     if not mr:
         raise HTTPException(status_code=404, detail="Management router not found")
-    backup = await backup_management_router(db, mr)
+    try:
+        backup = await backup_management_router(db, mr, ssh_port=ssh_port)
+    except (RouterOSError, OSError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
     await audit.record(db, user.username, "config_backup_created", target=mr.name)
     return {"id": backup.id, "stored_path": backup.stored_path}
 
 
 @router.post("/cpe/{cpe_id}")
-async def backup_cpe_now(cpe_id: int, user: User = Depends(require_operator), db: AsyncSession = Depends(get_db)):
+async def backup_cpe_now(
+    cpe_id: int,
+    ssh_port: int = 22,
+    user: User = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+):
     cpe = await db.get(CPE, cpe_id)
     if not cpe:
         raise HTTPException(status_code=404, detail="CPE not found")
     router_row = await db.get(ManagementRouter, cpe.management_router_id)
-    backup = await backup_cpe(db, cpe, router_row)
+    try:
+        backup = await backup_cpe(db, cpe, router_row, ssh_port=ssh_port)
+    except (RouterOSError, OSError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
     await audit.record(db, user.username, "config_backup_created", target=cpe.name)
     return {"id": backup.id, "stored_path": backup.stored_path}
 

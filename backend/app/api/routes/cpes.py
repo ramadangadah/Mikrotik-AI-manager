@@ -12,7 +12,7 @@ from app.models.management_router import ManagementRouter
 from app.models.metric import MetricSample
 from app.models.network import Network
 from app.models.user import User
-from app.schemas.cpe import BulkAdoptRequest, CPECreate, CPEOut, CPEUpdate
+from app.schemas.cpe import BulkAdoptRequest, BulkMactelnetSyncRequest, CPECreate, CPEOut, CPEUpdate
 from app.services import audit, mactelnet_service
 from app.services.device_connect import target_for_cpe
 from app.services.routeros_client import RouterOSError, connect
@@ -110,6 +110,27 @@ async def bulk_adopt(payload: BulkAdoptRequest, user: User = Depends(require_ope
     for cpe in cpes:
         await db.refresh(cpe)
     return cpes
+
+
+@router.post("/bulk-mactelnet-sync")
+async def bulk_mactelnet_sync(payload: BulkMactelnetSyncRequest, user: User = Depends(require_operator), db: AsyncSession = Depends(get_db)):
+    """
+    "Synchronize a range of CPEs one by one via MAC-Telnet using one shared
+    username/password" - applies the same credentials to every listed CPE,
+    testing each one in turn over MAC-Telnet (see mactelnet_service.bulk_sync
+    for why this is sequential rather than parallel like the IP-range scan),
+    and adopts (saves the credentials on) whichever ones respond. CPEs with
+    no MAC address on file are skipped - run a router-table discovery scan
+    first (POST /api/discovery/{router_id}/scan) to capture those.
+    """
+    result = await db.execute(select(CPE).where(CPE.id.in_(payload.cpe_ids)))
+    cpes = result.scalars().all()
+    summary = await mactelnet_service.bulk_sync(db, cpes, payload.username, payload.password)
+    await audit.record(
+        db, user.username, "cpe_bulk_mactelnet_sync",
+        target=f"{len(cpes)} CPEs", details=f"synced={summary['synced']} failed={summary['failed']} skipped={summary['skipped']}",
+    )
+    return summary
 
 
 @router.post("/{cpe_id}/test-connection")
