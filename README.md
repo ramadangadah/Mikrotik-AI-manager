@@ -12,7 +12,10 @@ fleet of client antennas.
   - *Indirect*: reads a management router's own neighbor/ARP/DHCP-lease/PPPoE tables to find the CPEs behind it -
     the only option for bridge-mode antennas with no IP anything outside could reach directly.
   - *Direct IP-range scan*: give it a CIDR or IP range plus credentials and it probes every address itself and
-    adopts whatever answers - one antenna per IP, no dependency on the router's tables.
+    adopts whatever answers - one antenna per IP, no dependency on the router's tables. The **management routers
+    themselves** can be bulk-added the same way (Management Routers → "Scan IP range") - one shared
+    username/password/port/API type tried against every address in a range, registering a new router for each
+    one that answers (addresses that already belong to an existing router are skipped, never duplicated).
 - **Reaching isolated/bridge-mode CPEs** three ways, chosen per device:
   - **SOCKS relay** through the management router's own built-in SOCKS proxy (one checkbox on the router, no
     firewall changes).
@@ -22,12 +25,17 @@ fleet of client antennas.
     router's own host. Which private-network ranges become reachable once connected is a separate **routing
     table** per router ("Private network routes" on the router's detail page) - add as many CIDRs as you need
     (a management VLAN, a CPE range, a PPPoE pool, ...), each routed through that tunnel; edits apply live if the
-    tunnel is already up, no reconnect needed.
+    tunnel is already up, no reconnect needed. For WireGuard specifically, also set the **router's own tunnel
+    address** ("Router's tunnel address" on the VPN form) - it's what lets the app and router reach *each other*
+    over the tunnel at all; leaving it blank is the single most common cause of a tunnel that shows "connected"
+    while nothing actually flows through it (see "Upgrading an existing deployment" below if this looks familiar).
   - **Direct**, for CPEs with their own routable IP (e.g. PPPoE clients with internet).
   - **MAC-Telnet**, by MAC address instead of IP - the same tool a technician runs from a laptop on the antenna's
     own segment. Discovery via a router's tables already captures every CPE's MAC; use it from a CPE's detail
-    page to test reachability or run the connectivity test below when there's no usable IP yet. Only works when
-    this app itself has layer-2 reachability to that CPE's segment (not over the internet or a routed VPN).
+    page to test reachability or run the connectivity test below when there's no usable IP yet, or **bulk-sync a
+    whole batch of them at once** from a router's detail page (select CPEs → "Sync via MAC-Telnet") - one shared
+    username/password tried against each selected CPE's MAC in turn, adopting whichever ones answer. Only works
+    when this app itself has layer-2 reachability to that CPE's segment (not over the internet or a routed VPN).
 - **Client connectivity test**: on a CPE's detail page, runs the field-technician checklist (radio: sector,
   SNR, signal, V/H chain balance, uptime, BTS link time, firmware match against the tower, disconnect count,
   ethernet link speed; network: ping to the PPPoE gateway/8.8.8.8/a domain, and RouterOS's own bandwidth-test
@@ -123,6 +131,19 @@ cleanly, and every piece it depends on (the exact pinned Python packages, the fr
 system VPN packages) was verified independently in this same environment - but the first real build is on your
 server. If `docker compose up -d --build` hits any error, send it back and it'll get fixed.
 
+Also verified this same way, in a later round fixing issues reported from a real deployment: the new
+schema-auto-migration path (built an "old-style" SQLite DB by hand missing several newer columns, ran the app's
+own startup against it, confirmed every missing column got added and the existing row's data survived intact);
+the WireGuard `AllowedIPs` fix (unit-tested all four cases - peer address + routes, peer address only, legacy
+fallback, nothing configured at all - confirming the app's own tunnel address can no longer leak into
+`AllowedIPs` the way it used to); the PPTP/L2TP preflight checks (both correctly detected this sandbox's missing
+`/dev/ppp` and reported the specific, actionable cause instead of the old generic 25-second timeout); the config
+backup error handling (confirmed a failed backup now returns a clear, specific 502 - e.g. "backup file was
+created but the SFTP download failed: connection refused" - instead of the previous bare "Internal server
+error"); and both new bulk features end-to-end against the mock RouterOS server and a real headless browser
+(bulk MAC-Telnet CPE sync, including its per-device skip/fail/success reporting; bulk management-router IP-range
+scan, including its de-duplication against already-registered routers) - zero console errors throughout.
+
 ## Installing on your Oracle Cloud instance
 
 1. **Get the code onto the instance.** Either push this project to your own GitHub repo and clone it there, or
@@ -184,6 +205,36 @@ server. If `docker compose up -d --build` hits any error, send it back and it'll
 
 6. **Add your first management router** (Management Routers → Add router), point it at one of your towers, then
    run a discovery scan or an IP-range scan from its detail page to pull in its CPEs.
+
+### Upgrading an existing deployment
+
+If you're updating a container that's already been running (rather than a fresh install), a few things changed
+that are worth knowing about:
+
+- **Database schema changes now apply automatically.** There's still no formal migration tool (Alembic isn't
+  wired in), but the app now checks, on every startup, whether any table it knows about is missing a column the
+  code expects - and adds it on the spot (`ALTER TABLE ... ADD COLUMN`) if so. Your existing routers/CPEs/
+  credentials/history are untouched; new columns just start out empty until you (or the app) fill them in. You no
+  longer need to delete the database and start over to pick up schema changes from an update - just
+  `git pull && docker compose up -d --build` as usual.
+- **If WireGuard "connects" but nothing is reachable through it**, this was a real bug: the app used to fall back
+  to *its own* tunnel address for `AllowedIPs` when no CIDR routes were configured, which silently made the
+  tunnel reject all traffic actually coming from the router. Fixed - but it also needs one new field filled in
+  to work correctly: open the router's detail page → VPN section → WireGuard, and set **"Router's tunnel
+  address"** to the router's own IP on the WireGuard network (e.g. `10.10.0.1` - whatever you gave the WireGuard
+  interface in `/interface/wireguard/peers` on the router itself). Reconnect afterward. The app now also pings
+  that address right after bringing the tunnel up and shows the result as a warning if it doesn't answer, so you
+  get a real connectivity signal instead of just "interface is up."
+- **If PPTP/L2TP still won't connect**, the error message is now specific instead of a generic 25-second
+  timeout - it'll tell you directly if `/dev/ppp` is missing (meaning the container needs `cap_add: NET_ADMIN`
+  and `devices: ["/dev/ppp:/dev/ppp"]` in `docker-compose.yml`, and to be *recreated* - not just restarted -
+  after adding them, since device/capability grants can't be added to an already-running container) or if a
+  required binary is missing from the image (rebuild with `docker compose up -d --build`). Try connecting again
+  after pulling this update and read whatever it reports back.
+- **If a config backup returned "Internal server error"**, that's fixed too - failures now report the real cause
+  (most commonly the device's SSH/SFTP service being unreachable on port 22, since RouterOS backups are pulled
+  over SFTP separately from the API call that creates them). If your devices use a non-default SSH port, pass
+  `?ssh_port=<port>` when triggering the backup.
 
 ### If you don't use the VPN tunnel feature
 

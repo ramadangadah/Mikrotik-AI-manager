@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Plus, Search, ScanLine, KeyRound, Archive, CheckSquare, Square, Shield, Plug, PlugZap, Copy } from "lucide-react";
+import { ArrowLeft, Plus, Search, ScanLine, KeyRound, Archive, CheckSquare, Square, Shield, Plug, PlugZap, Copy, Radio } from "lucide-react";
 import api from "../api/client.js";
 import { StatusBadge } from "../components/Badges.jsx";
 
@@ -9,7 +9,8 @@ function VpnSection({ router, onChange }) {
     vpn_type: router.vpn_type, vpn_username: router.vpn_username || "",
     vpn_password: "",
     wg_peer_public_key: router.wg_peer_public_key || "", wg_preshared_key: "",
-    wg_endpoint_port: router.wg_endpoint_port, wg_local_address: router.wg_local_address || "", wg_keepalive: router.wg_keepalive,
+    wg_endpoint_port: router.wg_endpoint_port, wg_local_address: router.wg_local_address || "",
+    wg_peer_address: router.wg_peer_address || "", wg_keepalive: router.wg_keepalive,
   });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -131,6 +132,8 @@ function VpnSection({ router, onChange }) {
           <>
             <div className="md:col-span-3 text-xs text-muted -mt-1">
               Which private networks become reachable once connected is set below, under "Private network routes".
+              The router's tunnel address below is required for basic app&lt;-&gt;router connectivity to work at all -
+              without it, the tunnel can come up "connected" while still passing no traffic.
             </div>
             <div>
               <label className="label">Endpoint port</label>
@@ -139,6 +142,10 @@ function VpnSection({ router, onChange }) {
             <div>
               <label className="label">This app's tunnel address</label>
               <input className="input" value={form.wg_local_address} onChange={(e) => setForm({ ...form, wg_local_address: e.target.value })} placeholder="10.99.0.2/24" />
+            </div>
+            <div>
+              <label className="label">Router's tunnel address (required)</label>
+              <input className="input" value={form.wg_peer_address} onChange={(e) => setForm({ ...form, wg_peer_address: e.target.value })} placeholder="10.99.0.1" />
             </div>
             <div>
               <label className="label">Router's WireGuard public key (peer)</label>
@@ -290,6 +297,9 @@ export default function RouterDetailPage() {
   });
   const [showAdoptForm, setShowAdoptForm] = useState(false);
   const [adoptForm, setAdoptForm] = useState({ username: "admin", password: "", connection_mode: "socks_relay" });
+  const [showMactelnetForm, setShowMactelnetForm] = useState(false);
+  const [mactelnetForm, setMactelnetForm] = useState({ username: "admin", password: "" });
+  const [mactelnetResults, setMactelnetResults] = useState(null);
 
   const load = useCallback(async () => {
     const [r, n, c] = await Promise.all([
@@ -345,6 +355,23 @@ export default function RouterDetailPage() {
     setSelected(new Set());
     setShowAdoptForm(false);
     await load();
+  }
+
+  async function bulkMactelnetSync(e) {
+    e.preventDefault();
+    if (selected.size === 0) return;
+    setBusyMsg(`Syncing ${selected.size} CPE(s) via MAC-Telnet, one by one...`);
+    setMactelnetResults(null);
+    try {
+      const res = await api.post("/cpes/bulk-mactelnet-sync", { cpe_ids: [...selected], ...mactelnetForm });
+      setBusyMsg(`MAC-Telnet sync: ${res.data.synced} synced, ${res.data.failed} failed, ${res.data.skipped} skipped (no MAC on file).`);
+      setMactelnetResults(res.data.results);
+      setSelected(new Set());
+      setShowMactelnetForm(false);
+      await load();
+    } catch (err) {
+      setBusyMsg(err.response?.data?.detail || "MAC-Telnet sync failed");
+    }
   }
 
   async function syncPppoe() {
@@ -472,6 +499,11 @@ export default function RouterDetailPage() {
               Adopt {selected.size} selected
             </button>
           )}
+          {selected.size > 0 && (
+            <button className="btn btn-secondary" onClick={() => setShowMactelnetForm((s) => !s)}>
+              <Radio size={14} /> Sync {selected.size} via MAC-Telnet
+            </button>
+          )}
           <button className="btn btn-secondary" onClick={() => setShowNetForm((s) => !s)}>
             <Plus size={14} /> Network
           </button>
@@ -512,6 +544,50 @@ export default function RouterDetailPage() {
           </div>
           <button className="btn btn-primary">Apply to {selected.size} CPE(s)</button>
         </form>
+      )}
+
+      {showMactelnetForm && (
+        <form onSubmit={bulkMactelnetSync} className="card p-4 grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+          <div className="md:col-span-4 text-xs text-muted -mt-1">
+            Tries this one username/password against each selected CPE's captured MAC address over MAC-Telnet, one
+            device at a time, and adopts whichever ones answer. Only works for CPEs on the same layer-2 segment as
+            this app (not over the internet, SOCKS relay, or a VPN tunnel) - and only for CPEs that already have a
+            MAC address on file (run "Discover via router tables" above first if not).
+          </div>
+          <div>
+            <label className="label">Username</label>
+            <input className="input" required value={mactelnetForm.username} onChange={(e) => setMactelnetForm({ ...mactelnetForm, username: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">Password</label>
+            <input className="input" type="password" required value={mactelnetForm.password} onChange={(e) => setMactelnetForm({ ...mactelnetForm, password: e.target.value })} />
+          </div>
+          <button className="btn btn-primary"><Radio size={14} /> Sync {selected.size} CPE(s)</button>
+        </form>
+      )}
+
+      {mactelnetResults && (
+        <div className="card p-4 space-y-2">
+          <h3 className="text-sm font-medium text-slate-200">MAC-Telnet sync results</h3>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-muted border-b border-panel2">
+                <th className="py-1.5 pr-3">CPE</th>
+                <th className="py-1.5 pr-3">MAC</th>
+                <th className="py-1.5">Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mactelnetResults.map((r) => (
+                <tr key={r.cpe_id} className="border-b border-panel2/60">
+                  <td className="py-1.5 pr-3 text-slate-200">{r.name}</td>
+                  <td className="py-1.5 pr-3 font-mono text-muted">{r.mac_address || "—"}</td>
+                  <td className={`py-1.5 ${r.ok ? "text-accent2" : "text-crit"}`}>{r.ok ? `OK (${r.version || "?"})` : r.error}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {cpesByNetwork.map(({ network, items }) => (

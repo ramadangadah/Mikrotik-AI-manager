@@ -1,12 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Plus, Router, Trash2, Zap, X } from "lucide-react";
+import { Plus, Router, Trash2, Zap, X, ScanLine } from "lucide-react";
 import api from "../api/client.js";
 import { StatusBadge } from "../components/Badges.jsx";
 
 const emptyForm = {
   name: "", host: "", port: 443, api_type: "rest", username: "admin", password: "",
   discovery_cidr: "", use_socks_relay: true, socks_port: 1080, verify_tls: false,
+};
+
+const emptyScanForm = {
+  ip_range: "", username: "admin", password: "", port: 443, api_type: "rest",
+  use_socks_relay: true, socks_port: 1080,
 };
 
 export default function RoutersPage() {
@@ -16,6 +21,10 @@ export default function RoutersPage() {
   const [busy, setBusy] = useState(false);
   const [testResult, setTestResult] = useState({});
   const [error, setError] = useState("");
+  const [showScanForm, setShowScanForm] = useState(false);
+  const [scanForm, setScanForm] = useState(emptyScanForm);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanMsg, setScanMsg] = useState("");
 
   async function load() {
     const res = await api.get("/management-routers");
@@ -57,6 +66,27 @@ export default function RoutersPage() {
     await load();
   }
 
+  async function runScan(e) {
+    e.preventDefault();
+    setScanBusy(true);
+    setScanMsg("Probing IP range directly...");
+    try {
+      const res = await api.post("/discovery/management-routers/ip-range-scan", {
+        ...scanForm, port: Number(scanForm.port), socks_port: Number(scanForm.socks_port),
+      });
+      setScanMsg(
+        `Scanned ${res.data.addresses_scanned} addresses, ${res.data.responded} responded - ` +
+        `added ${res.data.created} new router(s)${res.data.skipped_existing ? `, ${res.data.skipped_existing} already existed` : ""}.`
+      );
+      setScanForm(emptyScanForm);
+      await load();
+    } catch (err) {
+      setScanMsg(err.response?.data?.detail || "Scan failed");
+    } finally {
+      setScanBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -67,11 +97,65 @@ export default function RoutersPage() {
             Add as many sites/towers as you need.
           </p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowForm((s) => !s)}>
-          {showForm ? <X size={15} /> : <Plus size={15} />}
-          {showForm ? "Cancel" : "Add router"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button className="btn btn-secondary" onClick={() => setShowScanForm((s) => !s)}>
+            <ScanLine size={15} /> Scan IP range
+          </button>
+          <button className="btn btn-primary" onClick={() => setShowForm((s) => !s)}>
+            {showForm ? <X size={15} /> : <Plus size={15} />}
+            {showForm ? "Cancel" : "Add router"}
+          </button>
+        </div>
       </div>
+
+      {showScanForm && (
+        <form onSubmit={runScan} className="card p-5 grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="md:col-span-3 text-sm text-muted -mt-1 mb-1">
+            Bulk-add management routers: tries these credentials against every address in the range and registers a
+            new management router for whatever answers - one row per site/tower, no need to add them by hand.
+            Addresses that already belong to an existing router are skipped.
+          </div>
+          <div>
+            <label className="label">IP range</label>
+            <input className="input" required placeholder="10.10.0.0/24 or 10.10.0.1-10.10.0.50"
+              value={scanForm.ip_range} onChange={(e) => setScanForm({ ...scanForm, ip_range: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">Username</label>
+            <input className="input" required value={scanForm.username} onChange={(e) => setScanForm({ ...scanForm, username: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">Password</label>
+            <input className="input" type="password" required value={scanForm.password} onChange={(e) => setScanForm({ ...scanForm, password: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">Port</label>
+            <input className="input" type="number" value={scanForm.port} onChange={(e) => setScanForm({ ...scanForm, port: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">API type</label>
+            <select className="input" value={scanForm.api_type} onChange={(e) => setScanForm({ ...scanForm, api_type: e.target.value })}>
+              <option value="rest">REST</option>
+              <option value="api-ssl">Binary API (TLS)</option>
+              <option value="api">Binary API</option>
+            </select>
+          </div>
+          <div className="flex items-end gap-4">
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" checked={scanForm.use_socks_relay} onChange={(e) => setScanForm({ ...scanForm, use_socks_relay: e.target.checked })} />
+              Enable SOCKS relay on each
+            </label>
+            <div className="flex-1">
+              <label className="label">SOCKS port</label>
+              <input className="input" type="number" value={scanForm.socks_port} onChange={(e) => setScanForm({ ...scanForm, socks_port: e.target.value })} />
+            </div>
+          </div>
+          {scanMsg && <div className="md:col-span-3 text-sm text-slate-300">{scanMsg}</div>}
+          <div className="md:col-span-3">
+            <button className="btn btn-primary" disabled={scanBusy}>{scanBusy ? "Scanning..." : "Scan & add"}</button>
+          </div>
+        </form>
+      )}
 
       {showForm && (
         <form onSubmit={createRouter} className="card p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
