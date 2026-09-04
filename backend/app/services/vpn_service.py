@@ -35,10 +35,12 @@ import os
 import signal
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt, encrypt
 from app.models.management_router import ManagementRouter, VpnStatus, VpnType
+from app.models.router_route import RouterRoute
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,22 @@ _xl2tpd_process: asyncio.subprocess.Process | None = None
 
 def _tag(router: ManagementRouter) -> str:
     return f"router{router.id}"
+
+
+async def _route_cidrs(db: AsyncSession, router: ManagementRouter) -> list[str]:
+    """
+    The private-network ranges this router's tunnel should carry, from the
+    "Private network routes" table (management-routers/{id}/routes). Falls
+    back to the legacy single vpn_local_cidr field for routers set up before
+    that table existed, so nothing already deployed silently stops routing.
+    """
+    result = await db.execute(
+        select(RouterRoute.cidr).where(RouterRoute.management_router_id == router.id).order_by(RouterRoute.created_at)
+    )
+    cidrs = [r for r in result.scalars().all() if r]
+    if cidrs:
+        return cidrs
+    return [router.vpn_local_cidr] if router.vpn_local_cidr else []
 
 
 def _remotename(router: ManagementRouter) -> str:
@@ -84,10 +102,12 @@ async def _remove_chap_secret(remotename: str) -> None:
             f.write("\n".join(lines) + ("\n" if lines else ""))
 
 
-def _write_cidr_file(tag: str, cidr: str | None) -> None:
+def _write_cidr_file(tag: str, cidrs: list[str]) -> None:
+    """One CIDR per line - read by ppp-ip-up.sh/ppp-ip-down.sh, which loop
+    over every non-blank line to add/remove a route per private network."""
     os.makedirs(RUN_DIR, exist_ok=True)
     with open(os.path.join(RUN_DIR, f"{tag}.cidr"), "w") as f:
-        f.write(cidr or "")
+        f.write("\n".join(c for c in cidrs if c) + ("\n" if cidrs else ""))
 
 
 def _up_marker_path(tag: str) -> str:
@@ -150,7 +170,7 @@ async def _connect_pptp(db: AsyncSession, router: ManagementRouter) -> Managemen
         pass
 
     await _write_chap_secret(remotename, router.vpn_username or "", password)
-    _write_cidr_file(tag, router.vpn_local_cidr)
+    _write_cidr_file(tag, await _route_cidrs(db, router))
 
     args = [
         "pty", f"pptp {server} --nolaunchpppd",
@@ -191,7 +211,7 @@ async def _connect_l2tp(db: AsyncSession, router: ManagementRouter) -> Managemen
     await db.commit()
 
     await _write_chap_secret(remotename, router.vpn_username or "", password)
-    _write_cidr_file(tag, router.vpn_local_cidr)
+    _write_cidr_file(tag, await _route_cidrs(db, router))
 
     options_path = f"/etc/ppp/options.l2tpd.{tag}"
     os.makedirs(os.path.dirname(options_path), exist_ok=True)
@@ -282,7 +302,8 @@ async def _connect_wireguard(db: AsyncSession, router: ManagementRouter) -> Mana
     server = router.vpn_server or router.host
     private_key = decrypt(router.wg_private_key_encrypted)
     preshared = decrypt(router.wg_preshared_key_encrypted) if router.wg_preshared_key_encrypted else None
-    allowed_ips = router.vpn_local_cidr or router.wg_local_address
+    cidrs = await _route_cidrs(db, router)
+    allowed_ips = ", ".join(cidrs) if cidrs else (router.wg_local_address or "0.0.0.0/0")
 
     os.makedirs(WIREGUARD_DIR, exist_ok=True)
     lines = [
@@ -416,6 +437,62 @@ async def disconnect(db: AsyncSession, router: ManagementRouter) -> ManagementRo
     await db.commit()
     await db.refresh(router)
     return router
+
+
+async def apply_routes(db: AsyncSession, router: ManagementRouter) -> None:
+    """
+    Pushes the current "Private network routes" list onto an *already
+    connected* tunnel, without a disconnect/reconnect - called whenever a
+    route is added or removed on a router whose tunnel is currently up (see
+    api/routes/management_routers.py), so editing the routing table takes
+    effect immediately instead of only on the next reconnect.
+    """
+    cidrs = await _route_cidrs(db, router)
+
+    if router.vpn_type == VpnType.wireguard:
+        if not router.vpn_interface or not router.wg_peer_public_key:
+            return
+        allowed_ips = ", ".join(cidrs) if cidrs else (router.wg_local_address or "0.0.0.0/0")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "wg", "set", router.vpn_interface, "peer", router.wg_peer_public_key,
+                "allowed-ips", allowed_ips,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        except FileNotFoundError:
+            logger.warning("wg binary not found - could not live-update AllowedIPs for router %s", router.id)
+        return
+
+    # PPTP/L2TP: diff the previously-applied CIDRs (stashed in the .cidr
+    # file ppp-ip-up.sh wrote them into) against the current list, and add/
+    # remove routes directly on the already-up ppp interface - the ip-up/
+    # ip-down hooks only run when the link itself comes up or down, not on
+    # a routing-table edit while it's already connected.
+    if not router.vpn_interface:
+        return
+    tag = _tag(router)
+    cidr_path = os.path.join(RUN_DIR, f"{tag}.cidr")
+    old_cidrs: set[str] = set()
+    if os.path.exists(cidr_path):
+        with open(cidr_path) as f:
+            old_cidrs = {ln.strip() for ln in f if ln.strip()}
+    new_cidrs = {c for c in cidrs if c}
+
+    for cidr in old_cidrs - new_cidrs:
+        proc = await asyncio.create_subprocess_exec(
+            "ip", "route", "del", cidr, "dev", router.vpn_interface,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+    for cidr in new_cidrs - old_cidrs:
+        proc = await asyncio.create_subprocess_exec(
+            "ip", "route", "replace", cidr, "dev", router.vpn_interface,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+
+    _write_cidr_file(tag, list(new_cidrs))
 
 
 async def refresh_status(db: AsyncSession, router: ManagementRouter) -> ManagementRouter:

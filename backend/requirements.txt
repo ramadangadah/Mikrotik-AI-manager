@@ -20,3 +20,4 @@ python-socks[asyncio]==3.0.0
 librouteros==4.2.0
 anthropic==0.40.0
 openai==1.58.1
+pexpect==4.9.0

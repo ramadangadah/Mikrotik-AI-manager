@@ -11,10 +11,10 @@ CIDR_FILE="$RUNDIR/$IPPARAM.cidr"
 UP_FILE="$RUNDIR/$IPPARAM.up"
 
 if [ -f "$CIDR_FILE" ]; then
-  CIDR=$(cat "$CIDR_FILE")
-  if [ -n "$CIDR" ]; then
+  while IFS= read -r CIDR || [ -n "$CIDR" ]; do
+    [ -n "$CIDR" ] || continue
     ip route del "$CIDR" dev "$IFACE" 2>/dev/null || true
-  fi
+  done < "$CIDR_FILE"
 fi
 
 rm -f "$UP_FILE"
