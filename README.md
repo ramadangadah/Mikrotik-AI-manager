@@ -18,7 +18,23 @@ fleet of client antennas.
     firewall changes).
   - **VPN tunnel** dialed by the app straight into the management router's LAN - **PPTP**, **L2TP**, or
     **WireGuard** (with in-app keypair generation) - so the whole remote subnet becomes reachable at the OS level.
+    For PPTP/L2TP you only enter the VPN username/password; the server address is taken automatically from the
+    router's own host. Which private-network ranges become reachable once connected is a separate **routing
+    table** per router ("Private network routes" on the router's detail page) - add as many CIDRs as you need
+    (a management VLAN, a CPE range, a PPPoE pool, ...), each routed through that tunnel; edits apply live if the
+    tunnel is already up, no reconnect needed.
   - **Direct**, for CPEs with their own routable IP (e.g. PPPoE clients with internet).
+  - **MAC-Telnet**, by MAC address instead of IP - the same tool a technician runs from a laptop on the antenna's
+    own segment. Discovery via a router's tables already captures every CPE's MAC; use it from a CPE's detail
+    page to test reachability or run the connectivity test below when there's no usable IP yet. Only works when
+    this app itself has layer-2 reachability to that CPE's segment (not over the internet or a routed VPN).
+- **Client connectivity test**: on a CPE's detail page, runs the field-technician checklist (radio: sector,
+  SNR, signal, V/H chain balance, uptime, BTS link time, firmware match against the tower, disconnect count,
+  ethernet link speed; network: ping to the PPPoE gateway/8.8.8.8/a domain, and RouterOS's own bandwidth-test
+  toward your internal speed-test server) automatically over IP or MAC-Telnet, with pass/fail coloring against
+  the checklist's own thresholds. Whatever can't be automated - power-cycling the PoE injector, a TP-Link
+  router's own speed test, the client PC's fast.com result - is left for you to paste in afterward; every run is
+  saved with history.
 - **Monitoring & prediction**: CPU/memory/signal/CCQ/ping polled on a schedule, stored as time series, and turned
   into alerts three ways layered together - fixed-threshold rules, linear-regression trend prediction ("signal
   trending down, ~3 days to failure"), and IsolationForest anomaly detection over metric history - with an
@@ -55,11 +71,12 @@ frontend/   React (Vite) + Tailwind - builds to backend/static, served by FastAP
 backend/
   app/
     api/routes/   FastAPI routers (auth, management-routers, networks, cpes, discovery, alerts, firmware,
-                  config-backups, pppoe, jobs, scripts, assistant, settings, users, dashboard)
+                  config-backups, pppoe, jobs, scripts, assistant, settings, users, dashboard, connectivity-tests)
     core/         config, DB session, JWT/password hashing, Fernet encryption, scheduler
     models/       SQLAlchemy models (SQLite by default; point DATABASE_URL at Postgres to scale further)
-    services/     RouterOS client (REST + binary API, both SOCKS-relayable), discovery, polling, prediction/ML,
-                  firmware push, config backup/restore, PPPoE sync, VPN tunnel lifecycle, AI assistant/tools
+    services/     RouterOS client (REST + binary API, both SOCKS-relayable), MAC-Telnet client, discovery,
+                  polling, prediction/ML, firmware push, config backup/restore, PPPoE sync, VPN tunnel lifecycle,
+                  the client connectivity test, AI assistant/tools
     ml/           trend regression + IsolationForest anomaly detection
   scripts/        ppp-ip-up.sh / ppp-ip-down.sh - installed into the image so PPTP/L2TP tunnels get their routes
 Dockerfile          multi-stage: builds the frontend, then a slim Python 3.11 runtime with the VPN packages
@@ -77,16 +94,27 @@ This was built and tested in a sandboxed environment with no access to a real Mi
 Cloud instance, so testing here means: a hand-built mock RouterOS REST server (with TLS), a mock SOCKS5 relay, and
 a mock SFTP server, all exercised through the real, running application over real HTTP - not just code review.
 Verified working end-to-end this way: login and forced first-password-change, creating routers/networks/CPEs,
-both discovery modes, polling with real threshold-crossing alerts firing and clearing, firmware push (upload,
-SFTP transfer with integrity check, reboot, recovery poll), config backup pull, **config restore both
-on-demand and automatically on reconnect** (including the audit trail and the CPE's `last_restore_job_id`
-updating), PPPoE secret sync/export, ad-hoc RouterOS script execution (single CPE and confirmed bulk, with the
-unconfirmed-bulk guard), and the AI Assistant's tool-calling loop for both OpenAI- and Anthropic-shaped responses
-(read-only tool dispatch against the real DB, and the propose-then-confirm flow) using mocked LLM responses,
-since no API key was available in this environment. The full React frontend was built and driven through a real
-headless browser against the live backend - every page, the VPN configuration UI, running a script and restoring
-a backup from the CPE detail page, and the AI Assistant's "not configured" state all rendered and worked with
-zero console errors.
+both discovery modes (including MAC-address capture from neighbor/ARP/DHCP/PPPoE tables), polling with real
+threshold-crossing alerts firing and clearing, firmware push (upload, SFTP transfer with integrity check, reboot,
+recovery poll), config backup pull, **config restore both on-demand and automatically on reconnect** (including
+the audit trail and the CPE's `last_restore_job_id` updating), PPPoE secret sync/export, ad-hoc RouterOS script
+execution (single CPE and confirmed bulk, with the unconfirmed-bulk guard), and the AI Assistant's tool-calling
+loop for both OpenAI- and Anthropic-shaped responses (read-only tool dispatch against the real DB, and the
+propose-then-confirm flow) using mocked LLM responses, since no API key was available in this environment. The
+full React frontend was built and driven through a real headless browser against the live backend - every page,
+the VPN configuration UI, running a script and restoring a backup from the CPE detail page, and the AI
+Assistant's "not configured" state all rendered and worked with zero console errors.
+
+Also verified this same way, in a later round: the private-network routing table (add/list/delete a CIDR against
+a router, including the multi-CIDR PPTP/L2TP hook-script logic exercised directly with a stubbed `ip` command),
+the simplified PPTP/L2TP VPN form (server address auto-derived from the router's host), and the full client
+connectivity test - radio-field extraction (SNR/V-H-ratio/registration status/sector) and ping/bandwidth-test
+result parsing were unit-tested directly against realistic RouterOS output text, disconnect-count and
+firmware-alignment logic were verified against real DB rows, and the whole flow (run test, view results with
+pass/fail coloring, fill in the manual fields, save) was driven through a real headless browser with zero console
+errors. MAC-Telnet's failure path was verified against the real `mactelnet` client (installed and exercised in
+this environment) reaching a non-existent device - it times out and reports a clear error rather than hanging;
+reaching a **real** CPE over MAC-Telnet could not be tested here since that needs an actual device to talk to.
 
 **What could not be tested here**: an actual `docker build` - this environment's network policy blocks container
 registry access (Docker Hub), so the image itself has never been built or run. The Dockerfile was checked
@@ -164,6 +192,18 @@ WireGuard VPN tunnel feature. SOCKS relay and direct/IP-range-scanned CPEs work 
 you won't use VPN tunnels, you can delete both lines for a slightly more locked-down container. If you do use
 PPTP or L2TP, the host kernel needs the `ppp_generic` module loaded (`sudo modprobe ppp_generic` - most cloud
 Ubuntu/Oracle Linux images have this already); WireGuard doesn't need this.
+
+### MAC-Telnet reachability
+
+The Dockerfile installs the `mactelnet` client (apt package `mactelnet-client`) so CPEs can be reached by MAC
+address instead of IP. Two things worth knowing: the package name/availability can drift between base-image
+releases, so that install step is deliberately non-fatal - if it's missing on your build, everything else in the
+app still works, only MAC-Telnet won't be available until you install it by hand in the container. More
+importantly, MAC-Telnet is a **layer-2** protocol - it only works when this app has broadcast-domain reachability
+to a CPE's own network segment (e.g. the app runs on the same LAN/backhaul ring as your towers, or a tower
+bridges that segment to the app over something like EoIP). It will not work over the public internet, through
+the SOCKS relay, or across the PPTP/L2TP/WireGuard tunnels this app dials (those are all routed layer-3 tunnels,
+not layer-2 bridges) - for those situations, use IP-based reachability instead.
 
 ### Switching from SQLite to Postgres later
 

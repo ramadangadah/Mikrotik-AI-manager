@@ -9,7 +9,7 @@ export default function SettingsPage() {
 
   async function load() {
     const res = await api.get("/settings");
-    setForm({ ...res.data, llm_api_key: "", notify_telegram_bot_token: "" });
+    setForm({ ...res.data, llm_api_key: "", notify_telegram_bot_token: "", bandwidth_test_password: "" });
   }
 
   useEffect(() => { load(); }, []);
@@ -23,6 +23,9 @@ export default function SettingsPage() {
       // Don't overwrite a stored secret with an empty string if the field was left blank.
       if (!payload.llm_api_key) delete payload.llm_api_key;
       if (!payload.notify_telegram_bot_token) delete payload.notify_telegram_bot_token;
+      if (!payload.bandwidth_test_password) delete payload.bandwidth_test_password;
+      payload.ping_test_count = Number(payload.ping_test_count);
+      payload.bandwidth_test_duration_seconds = Number(payload.bandwidth_test_duration_seconds);
       await api.put("/settings", payload);
       setMsg("Settings saved.");
       await load();
@@ -98,6 +101,43 @@ export default function SettingsPage() {
             <div>
               <label className="label">Telegram chat id</label>
               <input className="input" value={form.notify_telegram_chat_id || ""} onChange={(e) => setForm({ ...form, notify_telegram_chat_id: e.target.value })} />
+            </div>
+          </div>
+        </div>
+
+        <div className="card p-5 space-y-4">
+          <h2 className="font-medium text-slate-100">Connectivity test defaults</h2>
+          <p className="text-xs text-muted -mt-2">
+            Defaults used by the "Client connectivity test" section on a CPE's detail page - see that page to
+            actually run a test. Leave the bandwidth-test target blank to skip that one step (it only applies to
+            Mikrotik CPEs anyway).
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="label">Ping test domain</label>
+              <input className="input" value={form.ping_test_domain} onChange={(e) => setForm({ ...form, ping_test_domain: e.target.value })} placeholder="google.com" />
+            </div>
+            <div>
+              <label className="label">Ping packet count</label>
+              <input className="input" type="number" value={form.ping_test_count} onChange={(e) => setForm({ ...form, ping_test_count: e.target.value })} />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div>
+              <label className="label">Bandwidth-test server (optional)</label>
+              <input className="input" value={form.bandwidth_test_target || ""} onChange={(e) => setForm({ ...form, bandwidth_test_target: e.target.value })} placeholder="your internal speed-test server IP" />
+            </div>
+            <div>
+              <label className="label">Username</label>
+              <input className="input" value={form.bandwidth_test_username} onChange={(e) => setForm({ ...form, bandwidth_test_username: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Password {form.bandwidth_test_password === "" && <span className="text-muted">(blank = keep current)</span>}</label>
+              <input className="input" type="password" value={form.bandwidth_test_password} onChange={(e) => setForm({ ...form, bandwidth_test_password: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Duration (seconds)</label>
+              <input className="input" type="number" value={form.bandwidth_test_duration_seconds} onChange={(e) => setForm({ ...form, bandwidth_test_duration_seconds: e.target.value })} />
             </div>
           </div>
         </div>

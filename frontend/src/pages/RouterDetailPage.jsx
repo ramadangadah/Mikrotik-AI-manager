@@ -6,8 +6,8 @@ import { StatusBadge } from "../components/Badges.jsx";
 
 function VpnSection({ router, onChange }) {
   const [form, setForm] = useState({
-    vpn_type: router.vpn_type, vpn_server: router.vpn_server || "", vpn_username: router.vpn_username || "",
-    vpn_password: "", vpn_local_cidr: router.vpn_local_cidr || "",
+    vpn_type: router.vpn_type, vpn_username: router.vpn_username || "",
+    vpn_password: "",
     wg_peer_public_key: router.wg_peer_public_key || "", wg_preshared_key: "",
     wg_endpoint_port: router.wg_endpoint_port, wg_local_address: router.wg_local_address || "", wg_keepalive: router.wg_keepalive,
   });
@@ -111,13 +111,10 @@ function VpnSection({ router, onChange }) {
 
         {(form.vpn_type === "pptp" || form.vpn_type === "l2tp") && (
           <>
-            <div>
-              <label className="label">VPN server (usually same as router host)</label>
-              <input className="input" value={form.vpn_server} onChange={(e) => setForm({ ...form, vpn_server: e.target.value })} />
-            </div>
-            <div>
-              <label className="label">Remote LAN CIDR</label>
-              <input className="input" value={form.vpn_local_cidr} onChange={(e) => setForm({ ...form, vpn_local_cidr: e.target.value })} placeholder="10.10.0.0/24" />
+            <div className="md:col-span-3 text-xs text-muted -mt-1">
+              Connects to this router's own address ({router.host}) as the PPTP/L2TP server - just enter the
+              VPN username/password configured on the router's PPP secrets and hit Connect. Which private
+              networks become reachable once connected is set below, under "Private network routes".
             </div>
             <div>
               <label className="label">VPN username</label>
@@ -132,9 +129,8 @@ function VpnSection({ router, onChange }) {
 
         {form.vpn_type === "wireguard" && (
           <>
-            <div>
-              <label className="label">Remote LAN CIDR</label>
-              <input className="input" value={form.vpn_local_cidr} onChange={(e) => setForm({ ...form, vpn_local_cidr: e.target.value })} placeholder="10.10.0.0/24" />
+            <div className="md:col-span-3 text-xs text-muted -mt-1">
+              Which private networks become reachable once connected is set below, under "Private network routes".
             </div>
             <div>
               <label className="label">Endpoint port</label>
@@ -178,6 +174,103 @@ function VpnSection({ router, onChange }) {
           </div>
         )}
       </form>
+    </div>
+  );
+}
+
+function RoutesSection({ router }) {
+  const [routes, setRoutes] = useState([]);
+  const [form, setForm] = useState({ cidr: "", description: "" });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const load = useCallback(async () => {
+    const res = await api.get(`/management-routers/${router.id}/routes`);
+    setRoutes(res.data);
+  }, [router.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function addRoute(e) {
+    e.preventDefault();
+    if (!form.cidr.trim()) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await api.post(`/management-routers/${router.id}/routes`, form);
+      setForm({ cidr: "", description: "" });
+      await load();
+      if (router.vpn_status === "connected") setMsg("Route added and applied to the live tunnel.");
+    } catch (err) {
+      setMsg(err.response?.data?.detail || "Failed to add route");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeRoute(routeId) {
+    setBusy(true);
+    setMsg("");
+    try {
+      await api.delete(`/management-routers/${router.id}/routes/${routeId}`);
+      await load();
+    } catch (err) {
+      setMsg(err.response?.data?.detail || "Failed to remove route");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card p-5 space-y-4">
+      <h2 className="font-medium text-slate-100">Private network routes</h2>
+      <p className="text-xs text-muted -mt-2">
+        Private-network ranges reachable through this router's tunnel, and what each one is for. Every CIDR
+        listed here is routed through the VPN tunnel above once it's connected - add one row per subnet (a
+        management VLAN, a CPE range, a PPPoE pool, etc). Changes apply immediately if the tunnel is already up.
+      </p>
+
+      {routes.length > 0 && (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-muted border-b border-panel2">
+              <th className="py-1.5 pr-3">CIDR</th>
+              <th className="py-1.5 pr-3">Description</th>
+              <th className="py-1.5 w-10"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {routes.map((r) => (
+              <tr key={r.id} className="border-b border-panel2/60">
+                <td className="py-1.5 pr-3 font-mono text-slate-200">{r.cidr}</td>
+                <td className="py-1.5 pr-3 text-muted">{r.description || "—"}</td>
+                <td className="py-1.5">
+                  <button className="text-crit" disabled={busy} onClick={() => removeRoute(r.id)} title="Remove">
+                    ×
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <form onSubmit={addRoute} className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div>
+          <label className="label">CIDR</label>
+          <input className="input" placeholder="10.20.30.0/24" value={form.cidr}
+            onChange={(e) => setForm({ ...form, cidr: e.target.value })} />
+        </div>
+        <div className="md:col-span-2">
+          <label className="label">Description (optional)</label>
+          <input className="input" placeholder="Tower management VLAN" value={form.description}
+            onChange={(e) => setForm({ ...form, description: e.target.value })} />
+        </div>
+        <div className="flex items-end">
+          <button className="btn btn-secondary w-full" disabled={busy}><Plus size={14} /> Add route</button>
+        </div>
+      </form>
+      {msg && <div className="text-xs text-muted">{msg}</div>}
     </div>
   );
 }
@@ -321,6 +414,7 @@ export default function RouterDetailPage() {
       {busyMsg && <div className="card p-3 text-sm text-slate-300">{busyMsg}</div>}
 
       <VpnSection router={router} onChange={setRouter} />
+      <RoutesSection router={router} />
 
       {showScanForm && (
         <form onSubmit={runIpRangeScan} className="card p-5 grid grid-cols-1 md:grid-cols-3 gap-4">

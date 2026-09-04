@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import {
-  ArrowLeft, Zap, Trash2, Save, Terminal, History, RotateCcw, Play,
+  ArrowLeft, Zap, Trash2, Save, Terminal, History, RotateCcw, Play, Radio, CheckCircle2, XCircle, MinusCircle,
 } from "lucide-react";
 import api from "../api/client.js";
 import { StatusBadge, SeverityBadge } from "../components/Badges.jsx";
@@ -38,6 +38,171 @@ function MetricChart({ cpeId, metricType, label, color }) {
             <Line type="monotone" dataKey="v" stroke={color} strokeWidth={1.75} dot={false} />
           </LineChart>
         </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+function Verdict({ pass }) {
+  if (pass === null || pass === undefined) return <MinusCircle size={14} className="text-muted inline" />;
+  return pass ? <CheckCircle2 size={14} className="text-accent2 inline" /> : <XCircle size={14} className="text-crit inline" />;
+}
+
+function fmt(v, suffix = "") {
+  return v === null || v === undefined ? "—" : `${v}${suffix}`;
+}
+
+function fmtSeconds(s) {
+  if (s === null || s === undefined) return "—";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return `${d}d ${h}h ${m}m`;
+}
+
+// Checklist row helper - label/value/badge on one line, matching the
+// original paper form's two-column layout ("check · recorded value").
+function Row({ label, value, verdict }) {
+  return (
+    <div className="flex items-center justify-between py-1.5 border-b border-panel2/60 text-sm">
+      <span className="text-muted">{label}</span>
+      <span className="flex items-center gap-2 text-slate-200">
+        {verdict !== undefined && <Verdict pass={verdict} />}
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function ConnectivityTestSection({ cpeId, mac }) {
+  const [tests, setTests] = useState([]);
+  const [latest, setLatest] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [manual, setManual] = useState({ rebooted: false, tplink_speedtest_notes: "", client_pc_speedtest_notes: "", notes: "" });
+
+  const load = useCallback(async () => {
+    const res = await api.get(`/cpes/${cpeId}/connectivity-tests`);
+    setTests(res.data);
+    if (res.data.length > 0) {
+      const t = res.data[0];
+      setLatest(t);
+      setManual({
+        rebooted: t.rebooted, tplink_speedtest_notes: t.tplink_speedtest_notes || "",
+        client_pc_speedtest_notes: t.client_pc_speedtest_notes || "", notes: t.notes || "",
+      });
+    }
+  }, [cpeId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function run(method) {
+    setBusy(true);
+    setMsg(`Running checks via ${method === "mac_telnet" ? "MAC-Telnet" : "IP"}...`);
+    try {
+      const res = await api.post(`/cpes/${cpeId}/connectivity-tests`, { method });
+      setMsg(res.data.run_error ? `Completed with an error: ${res.data.run_error}` : "Automated checks complete - fill in the manual items below.");
+      await load();
+    } catch (err) {
+      setMsg(err.response?.data?.detail || "Test failed to run");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveManual(e) {
+    e.preventDefault();
+    if (!latest) return;
+    setBusy(true);
+    try {
+      const res = await api.patch(`/connectivity-tests/${latest.id}`, manual);
+      setLatest(res.data);
+      setMsg("Saved.");
+    } catch (err) {
+      setMsg(err.response?.data?.detail || "Failed to save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card p-5 space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="font-medium text-slate-100 flex items-center gap-2"><Radio size={15} /> Client connectivity test</h2>
+        <div className="flex items-center gap-2">
+          <button className="btn btn-secondary" onClick={() => run("ip")} disabled={busy}>Run via IP</button>
+          <button className="btn btn-secondary" onClick={() => run("mac_telnet")} disabled={busy || !mac} title={!mac ? "No MAC address on file" : ""}>
+            Run via MAC-Telnet
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-muted -mt-2">
+        Pulls what RouterOS can report automatically (radio checks + ping/bandwidth-test); anything it can't see -
+        power-cycling the PoE injector, a TP-Link router's own speed test, the client PC's fast.com result - is
+        below for you to fill in by hand. A "—" means this device/driver just didn't report that field.
+      </p>
+      {msg && <div className="text-xs text-muted">{msg}</div>}
+
+      {latest && (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8">
+            <div>
+              <h3 className="text-xs uppercase tracking-wide text-muted mb-1">Controlli sulla radio del cliente</h3>
+              <Row label="Registered to sector" value={fmt(latest.sector_name)} verdict={latest.registered === null ? undefined : latest.registered} />
+              <Row label="SNR > 20 dB" value={fmt(latest.snr_db, " dB")} verdict={latest.snr_db == null ? null : latest.snr_db > 20} />
+              <Row label="Signal ≥ -75 dBm" value={fmt(latest.signal_dbm, " dBm")} verdict={latest.signal_dbm == null ? null : latest.signal_dbm > -75} />
+              <Row label="V/H ratio < 6 dB" value={fmt(latest.vh_ratio_db, " dB")} verdict={latest.vh_ratio_db == null ? null : latest.vh_ratio_db < 6} />
+              <Row label="CPE uptime" value={fmtSeconds(latest.cpe_uptime_seconds)} />
+              <Row label="BTS link time" value={fmtSeconds(latest.bts_connection_seconds)} />
+              <Row label="Firmware aligned to BTS" value={`${fmt(latest.cpe_firmware)} / ${fmt(latest.bts_firmware)}`} verdict={latest.firmware_aligned} />
+              <Row label={`Disconnects (${latest.disconnect_window_days}d)`} value={fmt(latest.disconnect_count)} verdict={latest.disconnect_count == null ? null : latest.disconnect_count === 0} />
+              <Row label="Ethernet link speed" value={fmt(latest.ethernet_link_speed)} />
+            </div>
+            <div>
+              <h3 className="text-xs uppercase tracking-wide text-muted mb-1">Test di rete</h3>
+              <Row label={`Ping gateway (${fmt(latest.ping_gateway_target)})`} value={fmt(latest.ping_gateway_result)} />
+              <Row label="Ping 8.8.8.8" value={fmt(latest.ping_public_ip_result)} />
+              <Row label={`Ping ${fmt(latest.ping_domain_target)}`} value={fmt(latest.ping_domain_result)} />
+              <Row label="Bandwidth-test (internal)" value={fmt(latest.bandwidth_test_result)} />
+              <p className="text-xs text-muted mt-2 whitespace-pre-wrap">{latest.bandwidth_test_result}</p>
+            </div>
+          </div>
+
+          <form onSubmit={saveManual} className="space-y-3 pt-2 border-t border-panel2">
+            <h3 className="text-xs uppercase tracking-wide text-muted">Manual entries</h3>
+            <label className="flex items-center gap-2 text-sm text-slate-200">
+              <input type="checkbox" checked={manual.rebooted} onChange={(e) => setManual({ ...manual, rebooted: e.target.checked })} />
+              Router + PoE power-cycled (30s off/on)
+            </label>
+            <div>
+              <label className="label">TP-Link router speed test result</label>
+              <input className="input" value={manual.tplink_speedtest_notes} onChange={(e) => setManual({ ...manual, tplink_speedtest_notes: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Client PC speed test (fast.com, cable-connected)</label>
+              <input className="input" value={manual.client_pc_speedtest_notes} onChange={(e) => setManual({ ...manual, client_pc_speedtest_notes: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Notes</label>
+              <textarea className="input" rows={2} value={manual.notes} onChange={(e) => setManual({ ...manual, notes: e.target.value })} />
+            </div>
+            <button className="btn btn-primary" disabled={busy}><Save size={14} /> Save</button>
+          </form>
+        </>
+      )}
+
+      {!latest && <div className="text-sm text-muted">No test run yet - click "Run via IP" or "Run via MAC-Telnet" above.</div>}
+
+      {tests.length > 1 && (
+        <div className="pt-2 border-t border-panel2">
+          <h3 className="text-xs uppercase tracking-wide text-muted mb-1">History</h3>
+          <div className="space-y-1 max-h-32 overflow-y-auto">
+            {tests.map((t) => (
+              <div key={t.id} className="text-xs text-muted flex items-center justify-between">
+                <span>{new Date(t.created_at).toLocaleString()} · via {t.method}</span>
+                <span>{t.run_error ? "error" : "ok"}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -91,12 +256,22 @@ export default function CpeDetailPage() {
   }
 
   async function testConnection() {
-    setTestResult({ loading: true });
+    setTestResult({ loading: true, via: "IP" });
     try {
       const res = await api.post(`/cpes/${id}/test-connection`);
-      setTestResult(res.data);
+      setTestResult({ ...res.data, via: "IP" });
     } catch (err) {
-      setTestResult({ ok: false, error: err.response?.data?.detail });
+      setTestResult({ ok: false, via: "IP", error: err.response?.data?.detail });
+    }
+  }
+
+  async function testMacTelnet() {
+    setTestResult({ loading: true, via: "MAC-Telnet" });
+    try {
+      const res = await api.post(`/cpes/${id}/test-mactelnet`);
+      setTestResult({ ...res.data, via: "MAC-Telnet" });
+    } catch (err) {
+      setTestResult({ ok: false, via: "MAC-Telnet", error: err.response?.data?.detail });
     }
   }
 
@@ -160,13 +335,18 @@ export default function CpeDetailPage() {
             <StatusBadge status={cpe.status} />
           </div>
           <p className="text-sm text-muted mt-0.5">
-            {cpe.host || cpe.mac_address || "no address"}:{cpe.port} · {cpe.connection_mode}
+            {cpe.host || "no IP"}{cpe.mac_address ? ` · ${cpe.mac_address}` : ""}:{cpe.port} · {cpe.connection_mode}
             {cpe.bridge_mode ? " · bridge mode" : ""}{cpe.pppoe_enabled ? " · pppoe" : ""}
             {cpe.routeros_version ? ` · RouterOS ${cpe.routeros_version}` : ""}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn btn-secondary" onClick={testConnection}><Zap size={14} /> Test</button>
+          <button className="btn btn-secondary" onClick={testConnection} disabled={!cpe.host}>
+            <Zap size={14} /> Test via IP
+          </button>
+          <button className="btn btn-secondary" onClick={testMacTelnet} disabled={!cpe.mac_address} title={!cpe.mac_address ? "No MAC address on file for this CPE" : "Requires layer-2 reachability to this CPE's segment"}>
+            <Zap size={14} /> Test via MAC-Telnet
+          </button>
           <button className="btn btn-secondary" onClick={() => setEditing((s) => !s)}>Edit</button>
           <button className="btn btn-danger !px-2" onClick={remove}><Trash2 size={14} /></button>
         </div>
@@ -174,7 +354,9 @@ export default function CpeDetailPage() {
 
       {testResult && !testResult.loading && (
         <div className={`card p-3 text-sm ${testResult.ok ? "text-accent2" : "text-crit"}`}>
-          {testResult.ok ? `Connected: RouterOS ${testResult.version} (${testResult.board})` : testResult.error}
+          {testResult.ok
+            ? `Connected via ${testResult.via}: RouterOS ${testResult.version} (${testResult.board}${testResult.identity ? `, ${testResult.identity}` : ""})`
+            : `${testResult.via}: ${testResult.error}`}
         </div>
       )}
       {msg && <div className="card p-3 text-sm text-slate-300">{msg}</div>}
@@ -264,6 +446,8 @@ export default function CpeDetailPage() {
           </div>
         </div>
       </div>
+
+      <ConnectivityTestSection cpeId={id} mac={cpe.mac_address} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="card p-5">

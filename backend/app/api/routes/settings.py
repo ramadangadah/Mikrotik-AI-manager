@@ -22,6 +22,12 @@ class SettingsUpdate(BaseModel):
     notify_webhook_url: str | None = None
     notify_telegram_bot_token: str | None = None
     notify_telegram_chat_id: str | None = None
+    ping_test_domain: str | None = None
+    ping_test_count: int | None = None
+    bandwidth_test_target: str | None = None
+    bandwidth_test_username: str | None = None
+    bandwidth_test_password: str | None = None
+    bandwidth_test_duration_seconds: int | None = None
 
 
 @router.get("")
@@ -32,6 +38,8 @@ async def get_current_settings(db: AsyncSession = Depends(get_db)):
         data["llm_api_key"] = "•" * 8 + data["llm_api_key"][-4:]
     if data.get("notify_telegram_bot_token"):
         data["notify_telegram_bot_token"] = "•" * 8 + data["notify_telegram_bot_token"][-4:]
+    if data.get("bandwidth_test_password"):
+        data["bandwidth_test_password"] = "•" * 8
     return data
 
 

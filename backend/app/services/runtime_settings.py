@@ -21,6 +21,12 @@ class EffectiveSettings:
     notify_webhook_url: str | None
     notify_telegram_bot_token: str | None
     notify_telegram_chat_id: str | None
+    ping_test_domain: str
+    ping_test_count: int
+    bandwidth_test_target: str | None
+    bandwidth_test_username: str
+    bandwidth_test_password: str
+    bandwidth_test_duration_seconds: int
 
 
 EDITABLE_KEYS = [
@@ -32,6 +38,12 @@ EDITABLE_KEYS = [
     "notify_webhook_url",
     "notify_telegram_bot_token",
     "notify_telegram_chat_id",
+    "ping_test_domain",
+    "ping_test_count",
+    "bandwidth_test_target",
+    "bandwidth_test_username",
+    "bandwidth_test_password",
+    "bandwidth_test_duration_seconds",
 ]
 
 
@@ -53,6 +65,15 @@ async def get_effective(db: AsyncSession) -> EffectiveSettings:
             return default
         return raw.lower() in _BOOL_TRUE
 
+    def pick_int(key: str, default: int) -> int:
+        raw = overrides.get(key)
+        if raw is None or raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+
     return EffectiveSettings(
         enable_llm_explanations=pick_bool("enable_llm_explanations", base.ENABLE_LLM_EXPLANATIONS),
         llm_provider=pick("llm_provider", base.LLM_PROVIDER),
@@ -62,6 +83,12 @@ async def get_effective(db: AsyncSession) -> EffectiveSettings:
         notify_webhook_url=pick("notify_webhook_url", base.NOTIFY_WEBHOOK_URL),
         notify_telegram_bot_token=pick("notify_telegram_bot_token", base.NOTIFY_TELEGRAM_BOT_TOKEN),
         notify_telegram_chat_id=pick("notify_telegram_chat_id", base.NOTIFY_TELEGRAM_CHAT_ID),
+        ping_test_domain=pick("ping_test_domain", base.PING_TEST_DOMAIN),
+        ping_test_count=pick_int("ping_test_count", base.PING_TEST_COUNT),
+        bandwidth_test_target=pick("bandwidth_test_target", base.BANDWIDTH_TEST_TARGET),
+        bandwidth_test_username=pick("bandwidth_test_username", base.BANDWIDTH_TEST_USERNAME),
+        bandwidth_test_password=pick("bandwidth_test_password", base.BANDWIDTH_TEST_PASSWORD),
+        bandwidth_test_duration_seconds=pick_int("bandwidth_test_duration_seconds", base.BANDWIDTH_TEST_DURATION_SECONDS),
     )
 
 

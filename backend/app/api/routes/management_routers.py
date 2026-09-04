@@ -8,8 +8,15 @@ from app.api.deps import require_admin, require_operator, require_password_set
 from app.core.crypto import encrypt
 from app.core.database import get_db
 from app.models.management_router import ManagementRouter
+from app.models.router_route import RouterRoute
 from app.models.user import User
-from app.schemas.router import ManagementRouterCreate, ManagementRouterOut, ManagementRouterUpdate
+from app.schemas.router import (
+    ManagementRouterCreate,
+    ManagementRouterOut,
+    ManagementRouterUpdate,
+    RouterRouteCreate,
+    RouterRouteOut,
+)
 from app.services import audit, vpn_service
 from app.services.device_connect import target_for_management_router
 from app.services.routeros_client import RouterOSError, connect
@@ -175,3 +182,65 @@ async def vpn_status(router_id: int, db: AsyncSession = Depends(get_db)):
     if not mr:
         raise HTTPException(status_code=404, detail="Management router not found")
     return await vpn_service.refresh_status(db, mr)
+
+
+# --- Private network routes (which CIDRs are reachable through this router's tunnel) ---
+
+@router.get("/{router_id}/routes", response_model=list[RouterRouteOut])
+async def list_routes(router_id: int, db: AsyncSession = Depends(get_db)):
+    mr = await db.get(ManagementRouter, router_id)
+    if not mr:
+        raise HTTPException(status_code=404, detail="Management router not found")
+    result = await db.execute(
+        select(RouterRoute).where(RouterRoute.management_router_id == router_id).order_by(RouterRoute.created_at)
+    )
+    return result.scalars().all()
+
+
+@router.post("/{router_id}/routes", response_model=RouterRouteOut, status_code=status.HTTP_201_CREATED)
+async def add_route(
+    router_id: int,
+    payload: RouterRouteCreate,
+    user: User = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+):
+    mr = await db.get(ManagementRouter, router_id)
+    if not mr:
+        raise HTTPException(status_code=404, detail="Management router not found")
+    route = RouterRoute(management_router_id=router_id, cidr=payload.cidr, description=payload.description)
+    db.add(route)
+    await audit.record(db, user.username, "router_route_added", target=mr.name, details=payload.cidr, commit=False)
+    await db.commit()
+    await db.refresh(route)
+    # A route added/changed while the tunnel is already up should take effect
+    # without requiring a manual disconnect/reconnect.
+    if mr.vpn_status.value == "connected":
+        try:
+            await vpn_service.apply_routes(db, mr)
+        except Exception:
+            pass
+    return route
+
+
+@router.delete("/{router_id}/routes/{route_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_route(
+    router_id: int,
+    route_id: int,
+    user: User = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+):
+    mr = await db.get(ManagementRouter, router_id)
+    if not mr:
+        raise HTTPException(status_code=404, detail="Management router not found")
+    route = await db.get(RouterRoute, route_id)
+    if not route or route.management_router_id != router_id:
+        raise HTTPException(status_code=404, detail="Route not found")
+    cidr = route.cidr
+    await db.delete(route)
+    await audit.record(db, user.username, "router_route_removed", target=mr.name, details=cidr, commit=False)
+    await db.commit()
+    if mr.vpn_status.value == "connected":
+        try:
+            await vpn_service.apply_routes(db, mr)
+        except Exception:
+            pass

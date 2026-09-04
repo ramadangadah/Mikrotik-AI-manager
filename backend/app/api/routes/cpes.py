@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_operator, require_password_set
-from app.core.crypto import encrypt
+from app.core.crypto import decrypt, encrypt
 from app.core.database import get_db
 from app.models.cpe import CPE
 from app.models.management_router import ManagementRouter
@@ -13,7 +13,7 @@ from app.models.metric import MetricSample
 from app.models.network import Network
 from app.models.user import User
 from app.schemas.cpe import BulkAdoptRequest, CPECreate, CPEOut, CPEUpdate
-from app.services import audit
+from app.services import audit, mactelnet_service
 from app.services.device_connect import target_for_cpe
 from app.services.routeros_client import RouterOSError, connect
 
@@ -124,6 +124,32 @@ async def test_cpe_connection(cpe_id: int, db: AsyncSession = Depends(get_db)):
             resource = await ros.get_single("system/resource")
         return {"ok": True, "version": resource.get("version"), "board": resource.get("board-name")}
     except RouterOSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/{cpe_id}/test-mactelnet")
+async def test_cpe_mactelnet(cpe_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Same idea as /test-connection, but reaches the CPE by its captured MAC
+    address over MikroTik's MAC-Telnet protocol instead of its IP - useful
+    to confirm a freshly-discovered bridge-mode device (no IP yet, or one
+    you don't want to route through) is actually reachable and the stored
+    credentials work, before relying on it. Only works when this app has
+    layer-2 reachability to the CPE's segment - see mactelnet_service.py.
+    """
+    cpe = await db.get(CPE, cpe_id)
+    if not cpe:
+        raise HTTPException(status_code=404, detail="CPE not found")
+    if not cpe.mac_address:
+        raise HTTPException(status_code=400, detail="This CPE has no MAC address on file yet (run discovery via the router's tables first)")
+    if not cpe.username:
+        raise HTTPException(status_code=400, detail="Set a username/password on this CPE first")
+    try:
+        result = await mactelnet_service.test_reachable(
+            cpe.mac_address, cpe.username, decrypt(cpe.password_encrypted) if cpe.password_encrypted else ""
+        )
+        return result
+    except mactelnet_service.MacTelnetError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 

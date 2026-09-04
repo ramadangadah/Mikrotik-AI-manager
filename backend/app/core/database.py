@@ -42,6 +42,7 @@ async def init_db() -> None:
         app_setting,
         audit_log,
         config_backup,
+        connectivity_test,
         cpe,
         firmware,
         job,
@@ -49,6 +50,7 @@ async def init_db() -> None:
         metric,
         network,
         pppoe_secret,
+        router_route,
         user,
     )
 

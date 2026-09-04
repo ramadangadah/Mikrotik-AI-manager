@@ -87,3 +87,18 @@ class ManagementRouterOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class RouterRouteCreate(BaseModel):
+    cidr: str = Field(min_length=1, max_length=64, description='e.g. "10.20.30.0/24"')
+    description: str | None = Field(default=None, max_length=255)
+
+
+class RouterRouteOut(BaseModel):
+    id: int
+    management_router_id: int
+    cidr: str
+    description: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

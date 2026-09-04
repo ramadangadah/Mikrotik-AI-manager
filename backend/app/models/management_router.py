@@ -109,3 +109,4 @@ class ManagementRouter(Base):
     )
 
     networks: Mapped[list["Network"]] = relationship(back_populates="management_router", cascade="all, delete-orphan")  # noqa: F821
+    routes: Mapped[list["RouterRoute"]] = relationship(back_populates="management_router", cascade="all, delete-orphan")  # noqa: F821

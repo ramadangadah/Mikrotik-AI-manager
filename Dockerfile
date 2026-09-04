@@ -30,6 +30,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
+# mactelnet-client - the `mactelnet` CLI, used by mactelnet_service.py to
+# reach a CPE by MAC address (layer 2) instead of IP, e.g. for a bridge-mode
+# antenna with no usable IP yet. Confirmed present in Ubuntu 24.04's
+# universe repo; Debian (this image's base) has carried the same source
+# package for years too, but package names/availability can drift between
+# base-image releases - this is deliberately non-fatal to the rest of the
+# build (`|| true`) so a missing/renamed package here never breaks the app
+# itself, it just means the MAC-Telnet path (IP-based reachability is
+# unaffected either way) won't be available until it's installed by hand.
+RUN apt-get update && apt-get install -y --no-install-recommends mactelnet-client \
+    && rm -rf /var/lib/apt/lists/* \
+    || echo "WARNING: mactelnet-client package not found for this base image - MAC-Telnet CPE access will be unavailable. Install it manually (or check the exact package name for your distro) if you need it."
+
 WORKDIR /app
 
 COPY backend/requirements.txt ./requirements.txt

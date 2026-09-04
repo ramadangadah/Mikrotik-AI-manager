@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     NOTIFY_TELEGRAM_BOT_TOKEN: str | None = None
     NOTIFY_TELEGRAM_CHAT_ID: str | None = None
 
+    # --- Connectivity test defaults (the "client connectivity test" checklist
+    # on a CPE's detail page - see services/connectivity_test_service.py) ---
+    PING_TEST_DOMAIN: str = "google.com"
+    PING_TEST_COUNT: int = 50
+    # Your own internal iperf-style speed-test server, reachable from your
+    # CPEs, used for the "/tool bandwidth-test toward internal speed test
+    # server" step - leave BANDWIDTH_TEST_TARGET unset to skip that step.
+    BANDWIDTH_TEST_TARGET: str | None = None
+    BANDWIDTH_TEST_USERNAME: str = "band"
+    BANDWIDTH_TEST_PASSWORD: str = "test"
+    BANDWIDTH_TEST_DURATION_SECONDS: int = 20
+
     # --- CORS (only matters if you serve frontend separately) ---
     CORS_ORIGINS: list[str] = ["*"]
 

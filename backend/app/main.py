@@ -60,6 +60,7 @@ from app.api.routes import (  # noqa: E402
     assistant,
     auth,
     config_backups,
+    connectivity_tests,
     cpes,
     discovery,
     dashboard,
@@ -76,6 +77,7 @@ from app.api.routes import (  # noqa: E402
 for module in (
     auth, users, management_routers, networks, cpes, discovery,
     dashboard, alerts, firmware, jobs, pppoe, config_backups, settings_routes, scripts, assistant,
+    connectivity_tests,
 ):
     app.include_router(module.router)
 
